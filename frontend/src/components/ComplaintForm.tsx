@@ -1,0 +1,494 @@
+import { useState, useRef } from "react";
+import Papa from "papaparse";
+import * as XLSX from "xlsx";
+import type { Complaint } from "../App";
+
+interface Props {
+  onSubmit: (c: Complaint) => void;
+  onError: (msg: string) => void;
+}
+
+export default function ComplaintForm({ onSubmit, onError }: Props) {
+  const [activeTab, setActiveTab] = useState<"manual" | "csv" | "excel">("manual");
+  
+  // Manual State
+  const [text, setText] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Batch State
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [batchData, setBatchData] = useState<any[]>([]);
+  const [batchHeaders, setBatchHeaders] = useState<string[]>([]);
+  const [selectedColumn, setSelectedColumn] = useState<string>("");
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [batchSummary, setBatchSummary] = useState<{ high: number; medium: number; low: number } | null>(null);
+
+  const resetBatchState = () => {
+    setBatchData([]);
+    setBatchHeaders([]);
+    setSelectedColumn("");
+    setProgress({ current: 0, total: 0 });
+    setBatchSummary(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  // --- MANUAL ENTRY ---
+  const handleManualSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!text.trim()) return onError("Please enter a complaint.");
+
+    setIsLoading(true);
+    try {
+      const res = await fetch("/api/classify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ complaint: text, source: "Manual" }),
+      });
+      if (!res.ok) throw new Error("Classification failed.");
+      const record = await res.json();
+      onSubmit(record);
+      setText("");
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // --- FILE PARSING ---
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    resetBatchState();
+
+    if (activeTab === "csv") {
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => {
+          if (!results.data || results.data.length === 0) return onError("CSV file is empty");
+          processParsedData(results.data, Object.keys(results.data[0] as object));
+        },
+        error: () => onError("Error parsing CSV file")
+      });
+    } else if (activeTab === "excel") {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        try {
+          const bstr = evt.target?.result;
+          const wb = XLSX.read(bstr, { type: "binary" });
+          const wsname = wb.SheetNames[0];
+          const ws = wb.Sheets[wsname];
+          const data = XLSX.utils.sheet_to_json(ws);
+          if (data.length === 0) return onError("Excel file is empty");
+          processParsedData(data, Object.keys(data[0] as object));
+        } catch {
+          onError("Error parsing Excel file");
+        }
+      };
+      reader.readAsBinaryString(file);
+    }
+  };
+
+  const processParsedData = (data: any[], headers: string[]) => {
+    setBatchData(data);
+    setBatchHeaders(headers);
+    
+    // Auto-detect column indicating complaint text
+    const lowerHeaders = headers.map(h => h.toLowerCase().trim());
+    const matchIndex = lowerHeaders.findIndex(h => 
+      ["complaint", "text", "description", "message", "issue"].includes(h)
+    );
+    
+    if (matchIndex !== -1) {
+      setSelectedColumn(headers[matchIndex]);
+    } else if (headers.length > 0) {
+      setSelectedColumn(headers[0]); // fallback
+    }
+  };
+
+  // --- BATCH PROCESSING ---
+  const handleBatchImport = async () => {
+    if (!selectedColumn) return onError("Please select a valid column.");
+    if (batchData.length === 0) return onError("No data to process.");
+    
+    setIsProcessing(true);
+    setProgress({ current: 0, total: batchData.length });
+    
+    let summary = { high: 0, medium: 0, low: 0 };
+
+    for (let i = 0; i < batchData.length; i++) {
+      const row = batchData[i];
+      const complaintText = row[selectedColumn] ? String(row[selectedColumn]).trim() : "";
+      
+      if (!complaintText) {
+        setProgress(p => ({ ...p, current: i + 1 }));
+        continue;
+      }
+
+      // Auto-Detect sentiment if present in CSV/Excel
+      let sentimentVal = "neutral";
+      const sentimentCol = batchHeaders.find(h => 
+        ["sentiment", "sentiment_score", "feeling", "tone"].includes(h.toLowerCase().trim())
+      );
+
+      if (sentimentCol) {
+        const rawSent = String(row[sentimentCol]).toLowerCase().trim();
+        if (["positive", "good", "happy", "1"].includes(rawSent) || Number(rawSent) > 0) {
+          sentimentVal = "positive";
+        } else if (["negative", "bad", "angry", "-1"].includes(rawSent) || Number(rawSent) < 0) {
+          sentimentVal = "negative";
+        }
+      }
+
+      try {
+        const res = await fetch("/api/classify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ 
+            complaint: complaintText, 
+            source: activeTab === "csv" ? "CSV" : "Excel",
+            sentiment: sentimentVal 
+          }),
+        });
+
+        if (res.ok) {
+          const record = await res.json();
+          onSubmit(record); // Add to UI real-time
+          
+          if (record.priority === "High") summary.high++;
+          else if (record.priority === "Medium") summary.medium++;
+          else summary.low++;
+        }
+      } catch (err) {
+        console.error("Batch error for row", i, err);
+      }
+      
+      setProgress(p => ({ ...p, current: i + 1 }));
+    }
+
+    setBatchSummary(summary);
+    setIsProcessing(false);
+  };
+
+  return (
+    <div className="w-full max-w-[860px] mx-auto py-10 px-4 transition-all duration-150 ease-in-out">
+      
+      {/* Top Header Section */}
+      <div className="mb-8 text-center flex flex-col items-center">
+        <h1 style={{ fontFamily: "var(--font-title)", fontWeight: 600, fontSize: "28px", color: "var(--color-text-primary)", letterSpacing: "-0.02em" }}>
+          Add Complaint
+        </h1>
+        <p style={{ fontFamily: "var(--font-content)", fontWeight: 400, fontSize: "15px", color: "var(--color-text-secondary)", marginTop: "4px" }}>
+          Submit a single complaint or import in bulk
+        </p>
+      </div>
+
+      {/* SUB-TABS */}
+      <div className="flex justify-center mb-8">
+        <div style={{ background: "var(--color-bg-tertiary)", borderRadius: "10px", padding: "4px", display: "inline-flex", gap: "4px" }}>
+          {[
+            { id: "manual", label: "Manual Entry" },
+            { id: "csv", label: "Import CSV" },
+            { id: "excel", label: "Import Excel" },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => { setActiveTab(tab.id as any); resetBatchState(); }}
+              style={{
+                padding: "10px 28px",
+                borderRadius: "8px",
+                fontFamily: "var(--font-title)",
+                fontWeight: 500,
+                fontSize: "14px",
+                background: activeTab === tab.id ? "var(--color-accent)" : "transparent",
+                color: activeTab === tab.id ? "#0D1F23" : "var(--color-text-secondary)",
+                transition: "all 150ms ease"
+              }}
+              onMouseEnter={(e) => {
+                if (activeTab !== tab.id) e.currentTarget.style.color = "var(--color-text-primary)";
+              }}
+              onMouseLeave={(e) => {
+                if (activeTab !== tab.id) e.currentTarget.style.color = "var(--color-text-secondary)";
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* CONTENT CARD */}
+      <div style={{ background: "var(--color-bg-secondary)", border: "1px solid var(--color-border)", borderRadius: "16px", padding: "32px", overflow: "hidden" }}>
+        
+        {/* TAB A: MANUAL ENTRY */}
+        {activeTab === "manual" && (
+          <form onSubmit={handleManualSubmit}>
+            <label style={{ display: "block", fontFamily: "var(--font-title)", fontWeight: 500, fontSize: "13px", color: "var(--color-text-secondary)", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: "12px" }}>
+              Complaint Text
+            </label>
+            <textarea
+              style={{
+                width: "100%",
+                minHeight: "180px",
+                background: "var(--color-bg-primary)",
+                border: "1px solid var(--color-border)",
+                borderRadius: "10px",
+                padding: "16px",
+                fontFamily: "var(--font-content)",
+                fontSize: "15px",
+                color: "var(--color-text-primary)",
+                resize: "vertical",
+                transition: "border-color 150ms ease",
+                outline: "none"
+              }}
+              className="placeholder:text-[var(--color-text-muted)]"
+              value={text}
+              maxLength={2000}
+              onChange={(e) => setText(e.target.value)}
+              onFocus={(e) => e.target.style.borderColor = "var(--color-accent)"}
+              onBlur={(e) => e.target.style.borderColor = "var(--color-border)"}
+              placeholder="Example: The seal on my protein powder was completely broken when it arrived. Powder is everywhere..."
+              readOnly={isLoading}
+            />
+            
+            <div className="mt-4 flex justify-between items-center h-[52px]">
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--color-text-muted)" }}>
+                {text.length} / 2000
+              </span>
+              <button
+                type="submit"
+                disabled={isLoading || !text.trim()}
+                style={{
+                  background: "var(--color-accent)",
+                  color: "#0D1F23",
+                  fontFamily: "var(--font-title)",
+                  fontWeight: 600,
+                  fontSize: "14px",
+                  padding: "12px 28px",
+                  borderRadius: "8px",
+                  border: "none",
+                  cursor: isLoading || !text.trim() ? "not-allowed" : "pointer",
+                  transition: "all 150ms ease",
+                  opacity: isLoading || !text.trim() ? 0.7 : 1,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px"
+                }}
+                onMouseEnter={(e) => {
+                  if (!isLoading && text.trim()) {
+                    e.currentTarget.style.background = "var(--color-accent-hover)";
+                    e.currentTarget.style.transform = "translateY(-1px)";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isLoading && text.trim()) {
+                    e.currentTarget.style.background = "var(--color-accent)";
+                    e.currentTarget.style.transform = "translateY(0)";
+                  }
+                }}
+              >
+                {isLoading ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-slate-900/30 border-t-slate-900 rounded-full animate-spin"></div>
+                    Classifying...
+                  </>
+                ) : (
+                  "Classify Complaint"
+                )}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* TAB B & C: CSV / EXCEL */}
+        {(activeTab === "csv" || activeTab === "excel") && (
+          <div>
+            {!batchData.length && !batchSummary && (
+              <div 
+                style={{
+                  border: "2px dashed var(--color-border)",
+                  borderRadius: "12px",
+                  background: "var(--color-bg-primary)",
+                  padding: "48px 24px",
+                  textAlign: "center",
+                  cursor: "pointer",
+                  transition: "all 150ms ease"
+                }}
+                onClick={() => fileInputRef.current?.click()}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = "var(--color-accent)";
+                  e.currentTarget.style.background = "rgba(45,212,191,0.04)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = "var(--color-border)";
+                  e.currentTarget.style.background = "var(--color-bg-primary)";
+                }}
+              >
+                 <input 
+                   type="file" 
+                   accept={activeTab === "csv" ? ".csv" : ".xlsx,.xls"} 
+                   className="hidden" 
+                   ref={fileInputRef}
+                   onChange={handleFileUpload}
+                 />
+                 <div className="flex justify-center mb-4 text-[var(--color-accent)]">
+                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                 </div>
+                 <div style={{ fontFamily: "var(--font-title)", fontWeight: 500, fontSize: "16px", color: "var(--color-text-primary)" }}>
+                   Drop your {activeTab.toUpperCase()} file here
+                 </div>
+                 <div style={{ fontFamily: "var(--font-content)", fontWeight: 400, fontSize: "13px", color: "var(--color-text-muted)", marginTop: "2px" }}>
+                   or click to browse
+                 </div>
+                 <div style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--color-text-muted)", marginTop: "8px" }}>
+                   {activeTab === "csv" ? ".csv files only" : ".xlsx, .xls files only"}
+                 </div>
+              </div>
+            )}
+
+            {batchData.length > 0 && !batchSummary && (
+              <div className="animate-in fade-in transition-all duration-150 ease-in-out">
+                
+                {/* File Info Row */}
+                <div style={{ background: "var(--color-bg-tertiary)", borderRadius: "8px", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "24px" }}>
+                  <div className="flex items-center gap-3">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                    <span style={{ fontFamily: "var(--font-title)", fontWeight: 500, fontSize: "14px", color: "var(--color-text-primary)" }}>{fileInputRef.current?.files?.[0]?.name || "import_data"}</span>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--color-text-muted)" }}>
+                      {fileInputRef.current?.files?.[0] ? Math.round(fileInputRef.current.files[0].size / 1024) + " KB" : ""}
+                    </span>
+                    <button onClick={resetBatchState} style={{ color: "var(--color-text-muted)", cursor: "pointer", display: "flex", outline: "none", border: "none", background: "none" }} onMouseEnter={e => e.currentTarget.style.color = "var(--color-negative)"} onMouseLeave={e => e.currentTarget.style.color = "var(--color-text-muted)"}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mb-6 flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-end">
+                  <div className="flex-1 w-full max-w-[300px]">
+                    <span style={{ display: "block", fontFamily: "var(--font-title)", fontWeight: 500, fontSize: "12px", color: "var(--color-text-secondary)", textTransform: "uppercase", marginBottom: "8px" }}>
+                      Complaint text column
+                    </span>
+                    <select 
+                      value={selectedColumn} 
+                      onChange={(e) => setSelectedColumn(e.target.value)}
+                      style={{ background: "var(--color-bg-primary)", border: "1px solid var(--color-border)", borderRadius: "8px", color: "var(--color-text-primary)", fontFamily: "var(--font-content)", fontSize: "14px", padding: "10px 14px", width: "100%", outline: "none", transition: "border-color 150ms ease" }}
+                      onFocus={(e) => e.target.style.borderColor = "var(--color-accent)"}
+                      onBlur={(e) => e.target.style.borderColor = "var(--color-border)"}
+                      disabled={isProcessing}
+                    >
+                      {batchHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                    </select>
+                  </div>
+                </div>
+
+                <div style={{ borderRadius: "8px", overflow: "hidden", border: "1px solid var(--color-border)", marginBottom: "24px" }}>
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr style={{ background: "var(--color-bg-primary)", borderBottom: "1px solid var(--color-border)" }}>
+                        {batchHeaders.slice(0, 4).map(h => (
+                          <th key={h} style={{ padding: "12px 16px", fontFamily: "var(--font-title)", fontWeight: 500, fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--color-text-muted)" }} className="truncate max-w-[150px]">
+                            {h} {h === selectedColumn && <span style={{ color: "var(--color-accent)", textTransform: "none", letterSpacing: "0", marginLeft: "4px" }}>(Target)</span>}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody style={{ background: "var(--color-bg-secondary)" }}>
+                      {batchData.slice(0, 5).map((row, i) => (
+                        <tr key={i} style={{ borderBottom: i < 4 ? "1px solid var(--color-border)" : "none" }}>
+                          {batchHeaders.slice(0, 4).map(h => (
+                             <td key={h} style={{ padding: "12px 16px", fontFamily: "var(--font-content)", fontWeight: 400, fontSize: "13px", color: "var(--color-text-primary)" }} className="truncate max-w-[150px]">{String(row[h])}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {isProcessing && (
+                  <div className="mb-6">
+                    <div style={{ background: "var(--color-bg-tertiary)", height: "3px", borderRadius: "2px", width: "100%", overflow: "hidden", marginBottom: "8px" }}>
+                      <div style={{ background: "var(--color-accent)", height: "3px", borderRadius: "2px", transition: "width 300ms ease", width: `${(progress.current / progress.total) * 100}%` }}></div>
+                    </div>
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--color-text-muted)", textAlign: "center" }}>
+                      Classifying {progress.current} of {progress.total}...
+                    </div>
+                  </div>
+                )}
+                
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleBatchImport}
+                    disabled={isProcessing}
+                    style={{
+                      background: "var(--color-accent)",
+                      color: "#0D1F23",
+                      fontFamily: "var(--font-title)",
+                      fontWeight: 600,
+                      fontSize: "14px",
+                      padding: "12px 28px",
+                      borderRadius: "8px",
+                      border: "none",
+                      cursor: isProcessing ? "not-allowed" : "pointer",
+                      transition: "all 150ms ease",
+                      opacity: isProcessing ? 0.7 : 1
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!isProcessing) {
+                        e.currentTarget.style.background = "var(--color-accent-hover)";
+                        e.currentTarget.style.transform = "translateY(-1px)";
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (!isProcessing) {
+                        e.currentTarget.style.background = "var(--color-accent)";
+                        e.currentTarget.style.transform = "translateY(0)";
+                      }
+                    }}
+                  >
+                    {isProcessing ? "Processing..." : "Import & Classify All"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {batchSummary && (
+              <div className="animate-in zoom-in border rounded-2xl p-8 text-center mt-4" style={{ background: "var(--color-bg-primary)", borderColor: "var(--color-positive)" }}>
+                <div className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4" style={{ background: "var(--color-positive-bg)", color: "var(--color-positive)" }}>
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                </div>
+                <h3 className="mb-2" style={{ fontFamily: "var(--font-title)", fontWeight: 600, fontSize: "20px", color: "var(--color-text-primary)" }}>{progress.total} imported successfully!</h3>
+                <div className="flex justify-center gap-4 mt-6">
+                  <div className="border rounded-lg px-4 py-2" style={{ background: "var(--color-bg-tertiary)", borderColor: "var(--color-border)" }}>
+                     <span className="block font-bold" style={{ fontSize: "20px", fontFamily: "var(--font-title)", color: "var(--color-high)" }}>{batchSummary.high}</span>
+                     <span className="text-xs uppercase font-semibold tracking-wider flex" style={{ fontFamily: "var(--font-title)", color: "var(--color-text-secondary)" }}>High</span>
+                  </div>
+                  <div className="border rounded-lg px-4 py-2" style={{ background: "var(--color-bg-tertiary)", borderColor: "var(--color-border)" }}>
+                     <span className="block font-bold" style={{ fontSize: "20px", fontFamily: "var(--font-title)", color: "var(--color-medium)" }}>{batchSummary.medium}</span>
+                     <span className="text-xs uppercase font-semibold tracking-wider flex" style={{ fontFamily: "var(--font-title)", color: "var(--color-text-secondary)" }}>Medium</span>
+                  </div>
+                  <div className="border rounded-lg px-4 py-2" style={{ background: "var(--color-bg-tertiary)", borderColor: "var(--color-border)" }}>
+                     <span className="block font-bold" style={{ fontSize: "20px", fontFamily: "var(--font-title)", color: "var(--color-low)" }}>{batchSummary.low}</span>
+                     <span className="text-xs uppercase font-semibold tracking-wider flex" style={{ fontFamily: "var(--font-title)", color: "var(--color-text-secondary)" }}>Low</span>
+                  </div>
+                </div>
+                <button 
+                  onClick={resetBatchState} 
+                  className="mt-8 font-medium hover:underline"
+                  style={{ color: "var(--color-accent)", fontFamily: "var(--font-content)" }}
+                >
+                  Upload another file
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
