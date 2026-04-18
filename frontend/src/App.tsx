@@ -5,6 +5,7 @@ import Dashboard from "./components/Dashboard";
 import ComplaintHistory from "./components/ComplaintHistory";
 import Analysis from "./components/Analysis";
 import ToastContainer from "./components/ToastContainer";
+import API_URL from "./config";
 
 export interface Complaint {
   id: string;
@@ -64,7 +65,7 @@ export default function App() {
 
   // Hydrate from backend on mount
   useEffect(() => {
-    fetch("/api/complaints")
+    fetch(`${API_URL}/api/complaints`)
       .then((r) => r.json())
       .then((data: Complaint[]) => {
         if (Array.isArray(data) && data.length > 0) {
@@ -97,7 +98,7 @@ export default function App() {
   const updateStatus = useCallback(
     async (id: string, status: "Open" | "In Progress" | "Resolved") => {
       try {
-        const res = await fetch(`/api/complaints/${id}/status`, {
+        const res = await fetch(`${API_URL}/api/complaints/${id}/status`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ status }),
@@ -131,7 +132,7 @@ export default function App() {
   const deleteComplaint = useCallback(
     async (id: string) => {
       try {
-        await fetch(`/api/complaints/${id}`, { method: "DELETE" });
+        await fetch(`${API_URL}/api/complaints/${id}`, { method: "DELETE" });
       } catch {
         // ignore
       }

@@ -2,6 +2,7 @@ import { useState, useRef } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import type { Complaint } from "../App";
+import API_URL from "../config";
 
 interface Props {
   onSubmit: (c: Complaint) => void;
@@ -40,7 +41,7 @@ export default function ComplaintForm({ onSubmit, onError }: Props) {
 
     setIsLoading(true);
     try {
-      const res = await fetch("/api/classify", {
+      const res = await fetch(`${API_URL}/api/classify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ complaint: text, source: "Manual" }),
@@ -144,7 +145,7 @@ export default function ComplaintForm({ onSubmit, onError }: Props) {
       }
 
       try {
-        const res = await fetch("/api/classify", {
+        const res = await fetch(`${API_URL}/api/classify`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ 

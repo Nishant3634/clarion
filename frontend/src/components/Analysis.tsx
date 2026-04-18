@@ -4,7 +4,8 @@ import {
   BarChart, Bar, Cell
 } from "recharts";
 import type { Complaint } from "../App";
-import { BrainCircuit, RefreshCw, TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { RefreshCw, TrendingUp, TrendingDown, Minus } from "lucide-react";
+import API_URL from "../config";
 
 interface Props {
   complaints: Complaint[];
@@ -161,7 +162,7 @@ export default function Analysis({ complaints, onError }: Props) {
     };
 
     try {
-      const res = await fetch("/api/analyze-insights", {
+      const res = await fetch(`${API_URL}/api/analyze-insights`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ summaryData: agg })
