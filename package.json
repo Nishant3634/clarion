@@ -1,0 +1,38 @@
+{
+  "name": "clarion",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "server": "node api/index.js",
+    "start": "node api/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@supabase/supabase-js": "^2.103.3",
+    "@types/papaparse": "^5.5.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.7",
+    "lucide-react": "^1.8.0",
+    "papaparse": "^5.5.3",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "recharts": "^3.8.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.4"
+  }
+}
