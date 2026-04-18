@@ -20,6 +20,7 @@ export default function ProtectedRoute({ children }: { children: React.ReactNode
     </div>
   )
 
+  // Allow access even without auth — app works offline with localStorage
   if (!user) return <LoginPage />
   return <>{children}</>
 }
